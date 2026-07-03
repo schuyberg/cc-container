@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Claude Code Docker — single entry point.
+#
+# Usage:
+#   claude-code setup                          one-time: build image, create
+#                                               auth volume, log in
+#   claude-code launch <dev-dir> [session-name] start/attach a session
+#   claude-code list                           show running sessions
+#   claude-code stop <session-name>            stop and remove a session
+#
+# Suggested alias, in your .bashrc/.zshrc:
+#   alias cc='/path/to/claude-code'
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
+
+usage() {
+  cat <<'EOF'
+Usage: claude-code <command> [args]
+
+Commands:
+  setup                           One-time: build image, create shared auth
+                                   volume, and log in to Claude Code.
+  launch <dev-dir> [session-name] Start a session mounting <dev-dir>, or
+                                   attach to it if already running. Multiple
+                                   sessions can run concurrently.
+  list                            List currently running sessions.
+  stop <session-name>             Stop and remove a session's container.
+  network <session-name> <net>    Attach a running session's container to
+                                   another Docker network (e.g. a project's
+                                   compose network, to reach its database).
+
+Examples:
+  claude-code setup
+  claude-code launch ~/projects/sooke-live
+  claude-code launch ~/projects/dot-tally dot-tally
+  claude-code list
+  claude-code network sooke-live sooke-live_default
+  claude-code stop sooke-live
+EOF
+}
+
+require_docker() {
+  if ! command -v docker &>/dev/null; then
+    echo "Docker isn't installed or isn't on PATH. Install it first: https://docs.docker.com/get-docker/" >&2
+    exit 1
+  fi
+  if ! docker compose version &>/dev/null; then
+    echo "Docker Compose v2 plugin not found. Update Docker Desktop, or install the compose-plugin package." >&2
+    exit 1
+  fi
+}
+
+# Return the first free localhost TCP port at or above $1.
+find_free_port() {
+  local port=$1
+  while (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; do
+    exec 3>&- 3<&- 2>/dev/null || true
+    port=$((port + 1))
+  done
+  echo "$port"
+}
+
+cmd_setup() {
+  require_docker
+
+  export USER_UID="$(id -u)"
+  export USER_GID="$(id -g)"
+
+  echo "Building the claude-code image (container user UID:GID = ${USER_UID}:${USER_GID})..."
+  docker compose build
+
+  if ! docker volume inspect claude-code-auth &>/dev/null; then
+    echo "Creating shared auth volume 'claude-code-auth'..."
+    docker volume create claude-code-auth
+  fi
+
+  mkdir -p ./workspace
+
+  echo
+  echo "Starting a temporary session to log in to Claude Code."
+  echo "If it doesn't prompt automatically, type /login inside claude and"
+  echo "follow the URL it prints in your browser."
+  echo "This login is stored in the shared 'claude-code-auth' volume, so"
+  echo "every session launched afterwards is already logged in."
+  echo
+
+  DEV_DIR="$(pwd)/workspace" SESSION_NAME=login \
+    docker compose -p claude-code-login run --rm claude-code claude
+
+  docker compose -p claude-code-login down &>/dev/null || true
+
+  echo
+  echo "Setup complete. Start a session with:"
+  echo "  claude-code launch /path/to/project [session-name]"
+}
+
+cmd_launch() {
+  require_docker
+
+  if [ $# -lt 1 ]; then
+    echo "Usage: claude-code launch <dev-directory> [session-name]" >&2
+    exit 1
+  fi
+
+  local dev_dir_input="$1"
+  if [ ! -d "$dev_dir_input" ]; then
+    read -rp "Directory '$dev_dir_input' doesn't exist. Create it? [y/N] " create
+    [[ "$create" =~ ^[Yy]$ ]] || exit 1
+    mkdir -p "$dev_dir_input"
+  fi
+  local dev_dir
+  dev_dir="$(cd "$dev_dir_input" && pwd)"
+
+  local session_name="${2:-$(basename "$dev_dir" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')}"
+  local project="claude-${session_name}"
+
+  # If this session's container is already running, just attach to it.
+  if [ "$(docker compose -p "$project" ps -q claude-code 2>/dev/null)" != "" ] \
+     && [ "$(docker inspect -f '{{.State.Running}}' "$(docker compose -p "$project" ps -q claude-code)" 2>/dev/null)" = "true" ]; then
+    echo "Session '$session_name' is already running — attaching..."
+    docker compose -p "$project" exec claude-code claude
+    return
+  fi
+
+  # Pick free ports independently per default, so concurrent sessions land
+  # on 3000/5173/8080/8000, then 3001/5174/8081/8001, etc.
+  local port1 port2 port3 port4
+  port1=$(find_free_port 3000)
+  port2=$(find_free_port 5173)
+  port3=$(find_free_port 8080)
+  port4=$(find_free_port 8000)
+
+  export USER_UID="$(id -u)"
+  export USER_GID="$(id -g)"
+
+  echo "Starting session '$session_name'"
+  echo "  Directory : $dev_dir"
+  echo "  Ports     : localhost:$port1 -> 3000, :$port2 -> 5173, :$port3 -> 8080, :$port4 -> 8000"
+  echo
+
+  DEV_DIR="$dev_dir" SESSION_NAME="$session_name" \
+  PORT1="$port1" PORT2="$port2" PORT3="$port3" PORT4="$port4" \
+    docker compose -p "$project" up -d
+
+  docker compose -p "$project" exec claude-code claude
+}
+
+cmd_network() {
+  require_docker
+  if [ $# -lt 2 ]; then
+    echo "Usage: claude-code network <session-name> <docker-network-name>" >&2
+    echo >&2
+    echo "Available docker networks:" >&2
+    docker network ls >&2
+    exit 1
+  fi
+
+  local session_name="$1" network_name="$2"
+  local project="claude-${session_name}"
+  local container_id
+  container_id="$(docker compose -p "$project" ps -q claude-code 2>/dev/null)"
+
+  if [ -z "$container_id" ]; then
+    echo "Session '$session_name' isn't running. Start it first with: claude-code launch ..." >&2
+    exit 1
+  fi
+
+  if ! docker network inspect "$network_name" &>/dev/null; then
+    echo "Network '$network_name' doesn't exist. List available networks with: docker network ls" >&2
+    exit 1
+  fi
+
+  docker network connect "$network_name" "$container_id"
+  echo "Attached session '$session_name' to network '$network_name'."
+  echo "From inside the session, other containers on that network are reachable by their service/container name."
+}
+
+cmd_list() {
+  require_docker
+  docker ps \
+    --filter "label=claude-code.session" \
+    --format 'table {{.Names}}\t{{.Label "claude-code.session"}}\t{{.Ports}}\t{{.Status}}'
+}
+
+cmd_stop() {
+  require_docker
+  if [ $# -lt 1 ]; then
+    echo "Usage: claude-code stop <session-name>" >&2
+    echo >&2
+    echo "Active sessions:" >&2
+    cmd_list
+    exit 1
+  fi
+  docker compose -p "claude-${1}" down
+}
+
+main() {
+  local cmd="${1:-}"
+  [ $# -gt 0 ] && shift || true
+
+  case "$cmd" in
+    setup)  cmd_setup "$@" ;;
+    launch) cmd_launch "$@" ;;
+    list)   cmd_list "$@" ;;
+    stop)   cmd_stop "$@" ;;
+    network) cmd_network "$@" ;;
+    -h|--help|help|"") usage ;;
+    *)
+      echo "Unknown command: $cmd" >&2
+      echo >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

@@ -1,0 +1,60 @@
+services:
+  claude-code:
+    build:
+      context: .
+      args:
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    image: claude-code-dev:latest
+    command: ["sleep", "infinity"]
+    stdin_open: true
+    tty: true
+    working_dir: /workspace
+    labels:
+      - "claude-code.session=${SESSION_NAME:-default}"
+
+    # --- Containment ---
+    cap_drop:
+      - ALL
+    cap_add:
+      # NET_ADMIN/NET_RAW: used briefly by entrypoint.sh (as root) to set up
+      # the outbound firewall.
+      # SETUID/SETGID: required by gosu to drop from root to the claude user;
+      # cap_drop: ALL strips these even from UID 0.
+      - NET_ADMIN
+      - NET_RAW
+      - SETUID
+      - SETGID
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:exec,size=1g
+      - /home/claude/.cache:size=512m
+      - /home/claude/.npm:size=512m
+      - /home/claude/.config:size=64m
+    mem_limit: 4g
+    pids_limit: 512
+
+    # Only these two paths are writable at all: your project, and Claude's
+    # own auth/config. Nothing else on disk can be written to, so there's
+    # no "outside the project" for a stray or malicious write to land on.
+    volumes:
+      - ${DEV_DIR:-./workspace}:/workspace
+      - claude-config:/home/claude/.claude
+    environment:
+      - CLAUDE_CONFIG_DIR=/home/claude/.claude
+      # Add project-specific allowed hosts by setting this before launch.sh,
+      # e.g.: EXTRA_ALLOWED_DOMAINS=example.com ./launch.sh ~/projects/foo
+      - EXTRA_ALLOWED_DOMAINS=${EXTRA_ALLOWED_DOMAINS:-}
+
+    ports:
+      - "${PORT1:-3000}:3000"
+      - "${PORT2:-5173}:5173"
+      - "${PORT3:-8080}:8080"
+      - "${PORT4:-8000}:8000"
+
+volumes:
+  claude-config:
+    external: true
+    name: claude-code-auth
