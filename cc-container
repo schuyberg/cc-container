@@ -7,6 +7,7 @@ set -euo pipefail
 #   claude-code setup                          one-time: build image, create
 #                                               auth volume, log in
 #   claude-code launch <dev-dir> [session-name] start/attach a session
+#   claude-code shell <session-name>           attach with a bash shell
 #   claude-code list                           show running sessions
 #   claude-code stop <session-name>            stop and remove a session
 #
@@ -14,6 +15,7 @@ set -euo pipefail
 #   alias cc='/path/to/claude-code'
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ORIG_PWD="$(pwd)"
 cd "$SCRIPT_DIR"
 
 usage() {
@@ -26,6 +28,8 @@ Commands:
   launch <dev-dir> [session-name] Start a session mounting <dev-dir>, or
                                    attach to it if already running. Multiple
                                    sessions can run concurrently.
+  shell <session-name>            Attach to a running session with a bash
+                                   shell instead of launching claude.
   list                            List currently running sessions.
   stop <session-name>             Stop and remove a session's container.
   network <session-name> <net>    Attach a running session's container to
@@ -36,6 +40,7 @@ Examples:
   claude-code setup
   claude-code launch ~/projects/sooke-live
   claude-code launch ~/projects/dot-tally dot-tally
+  claude-code shell sooke-live
   claude-code list
   claude-code network sooke-live sooke-live_default
   claude-code stop sooke-live
@@ -106,6 +111,9 @@ cmd_launch() {
   fi
 
   local dev_dir_input="$1"
+  if [[ "$dev_dir_input" != /* ]]; then
+    dev_dir_input="$ORIG_PWD/$dev_dir_input"
+  fi
   if [ ! -d "$dev_dir_input" ]; then
     read -rp "Directory '$dev_dir_input' doesn't exist. Create it? [y/N] " create
     [[ "$create" =~ ^[Yy]$ ]] || exit 1
@@ -114,14 +122,14 @@ cmd_launch() {
   local dev_dir
   dev_dir="$(cd "$dev_dir_input" && pwd)"
 
-  local session_name="${2:-$(basename "$dev_dir" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-')}"
+  local session_name="${2:-$(basename "$dev_dir" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/-*$//')}"
   local project="claude-${session_name}"
 
   # If this session's container is already running, just attach to it.
   if [ "$(docker compose -p "$project" ps -q claude-code 2>/dev/null)" != "" ] \
      && [ "$(docker inspect -f '{{.State.Running}}' "$(docker compose -p "$project" ps -q claude-code)" 2>/dev/null)" = "true" ]; then
     echo "Session '$session_name' is already running — attaching..."
-    docker compose -p "$project" exec claude-code claude
+    docker compose -p "$project" exec --user claude claude-code claude
     return
   fi
 
@@ -143,9 +151,30 @@ cmd_launch() {
 
   DEV_DIR="$dev_dir" SESSION_NAME="$session_name" \
   PORT1="$port1" PORT2="$port2" PORT3="$port3" PORT4="$port4" \
-    docker compose -p "$project" up -d
+    docker compose -p "$project" up -d --wait
 
-  docker compose -p "$project" exec claude-code claude
+  docker compose -p "$project" exec --user claude claude-code claude
+}
+
+cmd_shell() {
+  require_docker
+  if [ $# -lt 1 ]; then
+    echo "Usage: claude-code shell <session-name>" >&2
+    echo >&2
+    echo "Active sessions:" >&2
+    cmd_list
+    exit 1
+  fi
+
+  local session_name="$1"
+  local project="claude-${session_name}"
+
+  if [ "$(docker compose -p "$project" ps -q claude-code 2>/dev/null)" = "" ]; then
+    echo "Session '$session_name' isn't running. Start it first with: claude-code launch ..." >&2
+    exit 1
+  fi
+
+  docker compose -p "$project" exec --user claude claude-code bash
 }
 
 cmd_network() {
@@ -204,6 +233,7 @@ main() {
   case "$cmd" in
     setup)  cmd_setup "$@" ;;
     launch) cmd_launch "$@" ;;
+    shell)  cmd_shell "$@" ;;
     list)   cmd_list "$@" ;;
     stop)   cmd_stop "$@" ;;
     network) cmd_network "$@" ;;

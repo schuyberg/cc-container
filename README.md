@@ -141,7 +141,7 @@ Then, from that project's directory:
 ```bash
 docker compose build
 docker compose up -d
-docker compose exec cc-container claude
+docker compose exec --user claude cc-container claude
 ```
 
 It reuses the same shared `claude-code-auth` volume as the standalone

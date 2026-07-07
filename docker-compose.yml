@@ -21,24 +21,26 @@ services:
       # the outbound firewall.
       # SETUID/SETGID: required by gosu to drop from root to the claude user;
       # cap_drop: ALL strips these even from UID 0.
+      # CHOWN: required by entrypoint.sh to fix auth volume file ownership when
+      # the volume was written as root or after a UID change.
       - NET_ADMIN
       - NET_RAW
       - SETUID
       - SETGID
+      - CHOWN
     security_opt:
       - no-new-privileges:true
-    read_only: true
     tmpfs:
       - /tmp:exec,size=1g
-      - /home/claude/.cache:size=512m
-      - /home/claude/.npm:size=512m
-      - /home/claude/.config:size=64m
     mem_limit: 4g
     pids_limit: 512
+    healthcheck:
+      test: ["CMD", "test", "-f", "/tmp/.entrypoint-done"]
+      interval: 1s
+      timeout: 5s
+      retries: 15
+      start_period: 5s
 
-    # Only these two paths are writable at all: your project, and Claude's
-    # own auth/config. Nothing else on disk can be written to, so there's
-    # no "outside the project" for a stray or malicious write to land on.
     volumes:
       - ${DEV_DIR:-./workspace}:/workspace
       - claude-config:/home/claude/.claude

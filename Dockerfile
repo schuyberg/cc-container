@@ -39,12 +39,25 @@ RUN \
 WORKDIR /tmp
 RUN npm install -g @anthropic-ai/claude-code
 
+# npm install -g runs as root, so the global install tree comes out
+# root-owned (0755) with no group/other write bit. Since the claude user has
+# no path back to root, self-update (claude's own `npm install -g` re-run)
+# would fail with EACCES on a writable filesystem too unless this is handed
+# over to the claude user now.
+RUN chown -R "$USERNAME:$USERNAME" /usr/local/lib/node_modules /usr/local/bin
+
 COPY init-firewall.sh /usr/local/bin/init-firewall.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/init-firewall.sh /usr/local/bin/entrypoint.sh
 
 WORKDIR /workspace
 RUN chown "$USERNAME:$USERNAME" /workspace
+
+# Pre-create the auth config dir owned by the claude user. Docker copies a
+# named volume's mount point from the image on first use (when the volume is
+# empty), so this ensures fresh volumes start with the right ownership instead
+# of root:root.
+RUN mkdir -p /home/"$USERNAME"/.claude && chown "$USERNAME:$USERNAME" /home/"$USERNAME"/.claude
 
 # Container starts as root (needed to set up the firewall via NET_ADMIN),
 # then entrypoint.sh drops to the non-root user for everything else.
