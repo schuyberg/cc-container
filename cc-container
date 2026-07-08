@@ -6,7 +6,10 @@ set -euo pipefail
 # Usage:
 #   claude-code setup                          one-time: build image, create
 #                                               auth volume, log in
-#   claude-code launch <dev-dir> [session-name] start/attach a session
+#   claude-code launch <dev-dir> [session-name] [--new] [--env-file <path>]
+#                                               start/attach a session,
+#                                               resuming the last
+#                                               conversation unless --new
 #   claude-code shell <session-name>           attach with a bash shell
 #   claude-code list                           show running sessions
 #   claude-code stop <session-name>            stop and remove a session
@@ -26,8 +29,18 @@ Commands:
   setup                           One-time: build image, create shared auth
                                    volume, and log in to Claude Code.
   launch <dev-dir> [session-name] Start a session mounting <dev-dir>, or
-                                   attach to it if already running. Multiple
-                                   sessions can run concurrently.
+    [--new]                       attach to it if already running. Multiple
+    [--env-file <path>]           sessions can run concurrently. Resumes the
+                                   last conversation (claude --continue)
+                                   unless --new is passed, which starts a
+                                   fresh conversation instead. --env-file
+                                   loads KEY=VALUE pairs from <path> (which
+                                   should live outside <dev-dir>) straight
+                                   into the container's environment, without
+                                   ever mounting the file into /workspace.
+                                   Only applies when starting a new
+                                   container, not when attaching to one
+                                   already running.
   shell <session-name>            Attach to a running session with a bash
                                    shell instead of launching claude.
   list                            List currently running sessions.
@@ -105,8 +118,33 @@ cmd_setup() {
 cmd_launch() {
   require_docker
 
+  local new_session=false
+  local env_file=""
+  local positional=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --new)
+        new_session=true
+        shift
+        ;;
+      --env-file)
+        if [ $# -lt 2 ]; then
+          echo "Usage: claude-code launch <dev-directory> [session-name] [--new] [--env-file <path>]" >&2
+          exit 1
+        fi
+        env_file="$2"
+        shift 2
+        ;;
+      *)
+        positional+=("$1")
+        shift
+        ;;
+    esac
+  done
+  set -- "${positional[@]+"${positional[@]}"}"
+
   if [ $# -lt 1 ]; then
-    echo "Usage: claude-code launch <dev-directory> [session-name]" >&2
+    echo "Usage: claude-code launch <dev-directory> [session-name] [--new] [--env-file <path>]" >&2
     exit 1
   fi
 
@@ -125,11 +163,40 @@ cmd_launch() {
   local session_name="${2:-$(basename "$dev_dir" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/-*$//')}"
   local project="claude-${session_name}"
 
+  local claude_args=()
+  $new_session || claude_args=(--continue)
+
+  # SESSION_ENV_FILE is read by docker-compose.yml's env_file directive,
+  # which injects KEY=VALUE pairs into the container's environment without
+  # ever bind-mounting the file itself into /workspace. Defaults to /dev/null
+  # (an empty file) so compose has something valid to read when no
+  # --env-file was given.
+  local session_env_file="/dev/null"
+  if [ -n "$env_file" ]; then
+    local env_file_input="$env_file"
+    if [[ "$env_file_input" != /* ]]; then
+      env_file_input="$ORIG_PWD/$env_file_input"
+    fi
+    if [ ! -f "$env_file_input" ]; then
+      echo "Env file '$env_file_input' doesn't exist." >&2
+      exit 1
+    fi
+    session_env_file="$(cd "$(dirname "$env_file_input")" && pwd)/$(basename "$env_file_input")"
+    if [[ "$session_env_file" == "$dev_dir"/* ]]; then
+      echo "Warning: --env-file '$session_env_file' is inside <dev-dir> ($dev_dir)." >&2
+      echo "It won't be bind-mounted into /workspace, but keeping it outside <dev-dir> avoids Claude Code's file tools (Read/Grep/Glob) seeing it at all." >&2
+    fi
+  fi
+
   # If this session's container is already running, just attach to it.
   if [ "$(docker compose -p "$project" ps -q claude-code 2>/dev/null)" != "" ] \
      && [ "$(docker inspect -f '{{.State.Running}}' "$(docker compose -p "$project" ps -q claude-code)" 2>/dev/null)" = "true" ]; then
+    if [ -n "$env_file" ]; then
+      echo "Note: --env-file is ignored when attaching to an already-running session." >&2
+      echo "Run 'claude-code stop $session_name' first if you need to change its environment." >&2
+    fi
     echo "Session '$session_name' is already running — attaching..."
-    docker compose -p "$project" exec --user claude claude-code claude
+    docker compose -p "$project" exec --user claude claude-code claude "${claude_args[@]+"${claude_args[@]}"}"
     return
   fi
 
@@ -147,13 +214,17 @@ cmd_launch() {
   echo "Starting session '$session_name'"
   echo "  Directory : $dev_dir"
   echo "  Ports     : localhost:$port1 -> 3000, :$port2 -> 5173, :$port3 -> 8080, :$port4 -> 8000"
+  if [ "$session_env_file" != "/dev/null" ]; then
+    echo "  Env file  : $session_env_file (injected as container env vars, not mounted)"
+  fi
   echo
 
   DEV_DIR="$dev_dir" SESSION_NAME="$session_name" \
   PORT1="$port1" PORT2="$port2" PORT3="$port3" PORT4="$port4" \
+  SESSION_ENV_FILE="$session_env_file" \
     docker compose -p "$project" up -d --wait
 
-  docker compose -p "$project" exec --user claude claude-code claude
+  docker compose -p "$project" exec --user claude claude-code claude "${claude_args[@]+"${claude_args[@]}"}"
 }
 
 cmd_shell() {

@@ -44,6 +44,14 @@ services:
     volumes:
       - ${DEV_DIR:-./workspace}:/workspace
       - claude-config:/home/claude/.claude
+    # Injects KEY=VALUE pairs from a host file straight into the container's
+    # environment. The file itself is read by the `docker compose` CLI on
+    # the host and is never bind-mounted or copied into the container, so it
+    # never appears under /workspace where Claude Code's file tools could
+    # read it. Set via SESSION_ENV_FILE (cc-container launch --env-file);
+    # defaults to /dev/null (empty) when not provided.
+    env_file:
+      - ${SESSION_ENV_FILE:-/dev/null}
     environment:
       - CLAUDE_CONFIG_DIR=/home/claude/.claude
       # Add project-specific allowed hosts by setting this before launch.sh,

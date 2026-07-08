@@ -13,7 +13,7 @@ CLI script plus the Docker image/compose configs it drives. `plrep/` and
 
 ```bash
 ./cc-container setup                          # one-time: build image, create auth volume, log in
-./cc-container launch <dev-dir> [session-name]  # start or attach to a session
+./cc-container launch <dev-dir> [session-name] [--new] [--env-file <path>]  # start or attach to a session
 ./cc-container list                             # show running sessions
 ./cc-container stop <session-name>              # stop and remove a session
 ./cc-container network <session-name> <docker-network-name>  # attach a running session to another network
@@ -31,8 +31,14 @@ run `claude`.
   per-session project name (`claude-<session-name>`), so every session is its
   own isolated Compose project (own containers, network, ports), all sharing
   one login volume. `launch` auto-picks free host ports starting at
-  3000/5173/8080/8000 (incrementing per concurrent session) and re-attaches
-  instead of restarting if the session's container is already up.
+  3000/5173/8080/8000 (incrementing per concurrent session), resumes the
+  session's last `claude` conversation via `--continue` unless `--new` is
+  passed, and re-attaches instead of restarting if the session's container
+  is already up (in which case `--env-file` is ignored — env vars are fixed
+  at container creation, so changing them requires `stop` + relaunch).
+  `--env-file <path>` sets `SESSION_ENV_FILE`, consumed by
+  `docker-compose.yml`'s `env_file:` directive to inject secrets as
+  container env vars without ever bind-mounting the file into /workspace.
 - **`Dockerfile`** — Node 20 slim image with Claude Code installed globally.
   Builds a non-root `claude` user with UID/GID passed in as build args
   (`USER_UID`/`USER_GID`, set from the host user by `cc-container setup`/
@@ -89,3 +95,11 @@ run `claude`.
   'a-z0-9' '-'` turns `plrep\n` into `plrep-` with no newline left for
   `$(...)` to strip, silently appending a stray '-' to derived names.
   Strip/trim before or after any `tr -c` step in this style.
+- `--env-file` (`SESSION_ENV_FILE` / `env_file:` in docker-compose.yml) only
+  keeps secrets out of the *filesystem* Claude Code's Read/Grep/Glob tools
+  can browse (`/workspace`). It does not hide them from the `claude` process
+  itself — env vars set on a container are inherited by every `docker
+  compose exec` session into it (including the one `cc-container launch`
+  runs `claude` in), so a secret injected this way is still visible to
+  anything Claude's Bash tool runs (e.g. `env`). Don't describe this flag as
+  isolating secrets from the agent, only from casual file access/commits.
