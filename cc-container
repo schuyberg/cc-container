@@ -81,11 +81,32 @@ find_free_port() {
   echo "$port"
 }
 
+# Run `claude` in a session's container. If it was invoked with args (e.g.
+# --continue) and exits non-zero — e.g. the CLI's "No conversation found to
+# continue" when the session has no prior history yet — fall back to a
+# plain `claude` invocation to start a fresh conversation instead.
+exec_claude() {
+  local project="$1"
+  shift
+  local status=0
+  docker compose -p "$project" exec --user claude cc-container claude "$@" || status=$?
+  if [ "$status" -eq 0 ]; then
+    return 0
+  fi
+  if [ $# -gt 0 ]; then
+    echo "No previous conversation found for this session — starting a new one." >&2
+    docker compose -p "$project" exec --user claude cc-container claude
+    return $?
+  fi
+  return "$status"
+}
+
 cmd_setup() {
   require_docker
 
   export USER_UID="$(id -u)"
   export USER_GID="$(id -g)"
+  export SESSION_NAME=login
 
   echo "Building the cc-container image (container user UID:GID = ${USER_UID}:${USER_GID})..."
   docker compose build
@@ -200,7 +221,7 @@ cmd_launch() {
       echo "Run 'claude-code stop $session_name' first if you need to change its firewall config." >&2
     fi
     echo "Session '$session_name' is already running — attaching..."
-    docker compose -p "$project" exec --user claude cc-container claude "${claude_args[@]+"${claude_args[@]}"}"
+    exec_claude "$project" "${claude_args[@]+"${claude_args[@]}"}"
     return
   fi
 
@@ -228,7 +249,7 @@ cmd_launch() {
   SESSION_ENV_FILE="$session_env_file" \
     docker compose -p "$project" up -d --wait
 
-  docker compose -p "$project" exec --user claude cc-container claude "${claude_args[@]+"${claude_args[@]}"}"
+  exec_claude "$project" "${claude_args[@]+"${claude_args[@]}"}"
 }
 
 cmd_shell() {
