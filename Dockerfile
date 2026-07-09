@@ -15,6 +15,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     vim \
     iptables \
     gosu \
+    python3 \
+    python3-pip \
+    python3-venv \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user. UID/GID default to 1000 but should be built to match your
