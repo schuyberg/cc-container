@@ -1,4 +1,4 @@
-# Example: a project's own docker-compose.yml, with a claude-code service
+# Example: a project's own docker-compose.yml, with a cc-container service
 # built from the shared hardened Dockerfile, sharing this compose file's
 # network with the project's other services (here, a Postgres database).
 #
@@ -16,7 +16,7 @@ services:
       - db-data:/var/lib/postgresql/data
     # no ports: needed unless you also want to reach it from the host
 
-  claude-code:
+  cc-container:
     build:
       # Path to the claude-code-docker repo's Dockerfile, relative to this
       # file. Adjust as needed (e.g. a sibling directory, or a git submodule).
@@ -27,7 +27,12 @@ services:
     command: ["sleep", "infinity"]
     stdin_open: true
     tty: true
-    working_dir: /workspace
+    # Claude Code keys a session's resumable conversation history off the
+    # container's absolute cwd, inside the shared claude-config auth volume.
+    # Rename "myproject" below to this project's own name so it doesn't
+    # collide with any other project's history in that shared volume
+    # (including the standalone cc-container setup's own sessions).
+    working_dir: /workspace/myproject
 
     # Same containment posture as the standalone setup.
     cap_drop:
@@ -47,9 +52,10 @@ services:
     pids_limit: 512
 
     volumes:
-      # This project's own directory - since claude-code is defined in the
-      # project's own compose file, "." is simplest.
-      - .:/workspace
+      # This project's own directory - since cc-container is defined in the
+      # project's own compose file, "." is simplest. Must match the
+      # working_dir subdir name above (myproject).
+      - .:/workspace/myproject
       # Reuse the SAME shared auth volume from the standalone setup, so
       # this project's session is already logged in. Requires that volume
       # to already exist (created by `claude-code setup` once).
@@ -69,9 +75,9 @@ services:
       - "${PORT1:-3000}:3000"
       - "${PORT2:-5173}:5173"
 
-    # No explicit `networks:` needed - because `db` and `claude-code` are
+    # No explicit `networks:` needed - because `db` and `cc-container` are
     # both defined in this same compose file, Compose puts them on one
-    # shared default network automatically. From inside claude-code, the
+    # shared default network automatically. From inside cc-container, the
     # database is reachable simply as `db:5432`.
     depends_on:
       - db

@@ -49,12 +49,16 @@ run `claude`.
   ownership of the persisted auth volume, then uses `gosu` to drop to the
   non-root `claude` user permanently for the actual process. There is no
   `sudo` back to root from that point.
-- **`init-firewall.sh`** — default-deny outbound firewall via `iptables`.
-  Resolves an allowlist of domains (Anthropic API/claude.ai, npm/PyPI/GitHub)
-  to IPs at container start and only permits outbound 80/443 to those IPs;
-  everything else is dropped. It's a DNS-snapshot allowlist, not a
-  content-inspecting proxy — extend it per-session via `EXTRA_ALLOWED_DOMAINS`
-  rather than editing the script.
+- **`init-firewall.sh`** — outbound firewall via `iptables`, two modes.
+  Default (`FIREWALL_MODE=open` or unset): any host is reachable on ports
+  80/443 only (web browsing, search grounding, arbitrary APIs), every other
+  port is dropped. `FIREWALL_MODE=strict` switches to the old default-deny
+  behavior — only an explicit allowlist of domains (Anthropic API/
+  claude.ai, npm/PyPI/GitHub by default, resolved to IPs at container
+  start) is permitted on 80/443, extended per-session via
+  `EXTRA_ALLOWED_DOMAINS`. In either mode, `EXTRA_ALLOWED_PORTS` opens
+  specific additional ports to any destination on demand (e.g. a project
+  DB or SSH). It's DNS-snapshot/port-based, not a content-inspecting proxy.
 - **`docker-compose.yml`** — the containment posture: `cap_drop: ALL` with
   only `NET_ADMIN`/`NET_RAW` (firewall), `SETUID`/`SETGID` (for `gosu`), and
   `CHOWN` (for fixing auth volume ownership) added back, `no-new-privileges`,
@@ -63,6 +67,12 @@ run `claude`.
   `/workspace` and the `claude-config` auth volume persist across sessions.
   The `claude-config` volume (external, `claude-code-auth`) is what makes
   login shared across all sessions while everything else stays per-session.
+  The dev dir is bind-mounted (and `working_dir` set) to
+  `/workspace/${SESSION_NAME}`, not plain `/workspace` — Claude Code keys a
+  session's resumable conversation history (inside the shared `claude-config`
+  volume) off the container's absolute cwd, so every session needs a distinct
+  cwd or `claude --continue` resumes whichever session's conversation was most
+  recently active, not the one you're actually attached to.
 - **`project-docker-compose.yml`** — reference example for embedding a
   `cc-container` service directly into a project's own `docker-compose.yml`
   (e.g. alongside a `db` service), so the session can reach project services
@@ -77,10 +87,13 @@ run `claude`.
 - Anything that needs elevated privilege must happen in the root phase of
   `entrypoint.sh`/`init-firewall.sh`, before `gosu` drops to `claude` — the
   `claude` user has no path back to root.
-- If a session needs outbound access to a new host, prefer
-  `EXTRA_ALLOWED_DOMAINS` at launch time over hardcoding into
-  `init-firewall.sh`'s `DEFAULT_DOMAINS`, unless the domain should be allowed
-  for every session by default.
+- Sessions default to `FIREWALL_MODE=open` (any host, ports 80/443 only). A
+  session that needs tighter isolation should set `FIREWALL_MODE=strict` at
+  launch time (plus `EXTRA_ALLOWED_DOMAINS` for any host beyond the built-in
+  allowlist) rather than that becoming the new default for every session. A
+  session that needs a non-web port (e.g. a DB) should use
+  `EXTRA_ALLOWED_PORTS` at launch time rather than hardcoding into
+  `init-firewall.sh`.
 - Only `/workspace` and `/home/claude/.claude` persist across sessions. The
   rest of the container filesystem is ephemeral (discarded on `docker compose
   down`) — don't design changes that assume other paths survive a restart.

@@ -10,17 +10,19 @@ The following documentation and project code is AI-Generated (Claude Sonnet 5).
 
 
 Node + Claude Code, launched per-project on demand, with several layers of
-containment: a non-root user, a mostly read-only filesystem, dropped Linux
-capabilities, and an outbound network allowlist. Any number of sessions can
-run concurrently, each mounting a different directory, sharing one login.
+containment: a non-root user, an ephemeral filesystem, dropped Linux
+capabilities, and an outbound firewall (open to any host on ports 80/443 by
+default, or a strict domain allowlist on request). Any number of sessions
+can run concurrently, each mounting a different directory, sharing one
+login.
 
 ## What's containing what
 
 | Risk | Mitigation |
 |---|---|
-| Writes outside the project | `read_only: true` root filesystem. Only `/workspace` (your project) and the auth volume are writable — there's structurally nowhere else on disk to write to. |
+| Writes outside the project | The container filesystem is writable but ephemeral — its overlay layer is discarded on `docker compose down`. Only `/workspace` (your project) and the auth volume actually persist across sessions. |
 | Malicious code running with elevated privilege | Process runs as a non-root user with no `sudo`. `cap_drop: ALL` removes every Linux capability except the two (`NET_ADMIN`, `NET_RAW`) needed transiently by root at startup to configure the firewall — the actual `claude` process never has them. `no-new-privileges` blocks privilege escalation via setuid binaries. |
-| Data exfiltration / pulling down more payloads | `init-firewall.sh` sets a default-deny outbound firewall, resolved at container start to only allow Anthropic's API, `claude.ai`, and common package/git registries (npm, PyPI, GitHub). Everything else outbound is dropped. |
+| Data exfiltration / pulling down more payloads | `init-firewall.sh` sets an outbound firewall. By default, any host is reachable but only on ports 80/443 (web browsing, search grounding, APIs) — every other port is dropped. `FIREWALL_MODE=strict` switches to a default-deny domain allowlist (Anthropic's API, `claude.ai`, common package/git registries) instead. |
 | Fork bombs / resource exhaustion | `mem_limit` and `pids_limit` cap what one session can consume. |
 | One project's session compromising another | Already true from the multi-session design — each project gets its own container, network, and ports; only the login is shared. |
 
@@ -28,13 +30,18 @@ None of this replaces Claude Code's own permission prompts — it's what
 stands between you and trouble if you're running with looser permissions
 (e.g. `--dangerously-skip-permissions`) or working with an untrusted repo.
 
-**Limits, honestly**: the firewall is a DNS-resolved IP allowlist, not a
-content-inspecting proxy — it stops arbitrary-host exfiltration but isn't
-foolproof against DNS rebinding or a compromised allowed host. Container
-isolation also isn't a hard security boundary against a determined kernel
-exploit. Treat this as raising the bar substantially, not as an absolute
-guarantee — don't run untrusted code with `--dangerously-skip-permissions`
-expecting zero risk.
+**Limits, honestly**: in the default "open" mode, the firewall only
+restricts by *port*, not destination — any host is reachable on 80/443, so
+it doesn't stop exfiltration over HTTP(S) to an arbitrary server, only
+non-web protocols (raw TCP, SSH, DB wire protocols, etc. to hosts you
+haven't explicitly opened via `EXTRA_ALLOWED_PORTS`). If you need the
+stronger guarantee — only named hosts reachable at all — use
+`FIREWALL_MODE=strict`, which is a DNS-resolved IP allowlist, not a
+content-inspecting proxy either (not foolproof against DNS rebinding or a
+compromised allowed host). Container isolation also isn't a hard security
+boundary against a determined kernel exploit. Treat either mode as raising
+the bar substantially, not as an absolute guarantee — don't run untrusted
+code with `--dangerously-skip-permissions` expecting zero risk.
 
 ## First-time setup (once per machine)
 
@@ -74,20 +81,50 @@ whose session is already up just attaches to it.
 
 ```bash
 ./cc-container list
+./cc-container shell sooke-live
 ./cc-container stop sooke-live
 ```
 
-## Letting a project reach an extra host
+`shell` attaches to a running session with a bash shell instead of
+launching `claude` — handy for poking around, running one-off commands, or
+debugging the container itself. Like `launch`'s attach path, it runs as
+the `claude` user, not root.
 
-If a project needs something outside the default allowlist (a private
-package registry, an API you're integrating with), set it before launching:
+## Locking a session down further
+
+By default every session can reach any host on ports 80/443. If a
+particular session should be restricted to a named set of hosts instead
+(e.g. working with an untrusted repo), switch it to strict mode at launch:
 
 ```bash
-EXTRA_ALLOWED_DOMAINS=my-registry.example.com ./cc-container launch ~/projects/foo
+FIREWALL_MODE=strict ./cc-container launch ~/projects/foo
+```
+
+Strict mode allows only Anthropic's API, `claude.ai`, and common
+package/git registries (npm, PyPI, GitHub) by default. Add more hosts to
+that session with `EXTRA_ALLOWED_DOMAINS`:
+
+```bash
+FIREWALL_MODE=strict EXTRA_ALLOWED_DOMAINS=my-registry.example.com ./cc-container launch ~/projects/foo
 ```
 
 Comma-separate multiple domains. This only affects that session's
-container.
+container, and `FIREWALL_MODE`/`EXTRA_ALLOWED_DOMAINS` are fixed at
+container creation — changing them requires `stop` + relaunch.
+
+## Opening a non-web port
+
+Both modes only allow outbound 80/443 by default. If a session needs to
+reach something else directly (a database, SSH), open the specific port(s)
+for any destination at launch:
+
+```bash
+EXTRA_ALLOWED_PORTS=5432,22 ./cc-container launch ~/projects/foo
+```
+
+For a project's *own* backing services, prefer the Compose-network
+approaches below instead — they don't require opening a port to the whole
+internet.
 
 ## Connecting to a project's own services (e.g. a database)
 
@@ -102,8 +139,8 @@ service defined in one file on a shared default network automatically, the
 session can then reach the database simply as `db:5432` — no extra network
 wiring needed.
 
-See `examples/project-docker-compose.yml` for a full example. The short
-version:
+See `project-docker-compose.yml` (in this repo) for a full example. The
+short version:
 
 ```yaml
 services:
@@ -120,13 +157,14 @@ services:
     command: ["sleep", "infinity"]
     stdin_open: true
     tty: true
+    working_dir: /workspace/myproject   # distinct cwd, see project-docker-compose.yml
     cap_drop: [ALL]
     cap_add: [NET_ADMIN, NET_RAW]
     security_opt: [no-new-privileges:true]
     read_only: true
     tmpfs: ["/tmp:exec,size=1g", "/home/claude/.cache:size=512m"]
     volumes:
-      - .:/workspace
+      - .:/workspace/myproject
       - claude-config:/home/claude/.claude   # reuse the shared login
     depends_on: [db]
 
@@ -178,6 +216,6 @@ This attachment doesn't persist across `stop`/`launch` cycles — re-run
 - Rebuilding the image (`docker compose build`) doesn't touch the auth
   volume, so Claude Code/Node upgrades don't force a re-login.
 - If a session ever needs a genuinely unrestricted shell (e.g. debugging
-  the firewall itself), you can temporarily comment out the `cap_drop`/
-  `read_only` block in `docker-compose.yml` for that container — just
-  remember to put it back.
+  the firewall itself), you can temporarily comment out the `cap_drop`
+  block in `docker-compose.yml` for that container — just remember to put
+  it back.

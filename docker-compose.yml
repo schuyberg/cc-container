@@ -1,15 +1,15 @@
 services:
-  claude-code:
+  cc-container:
     build:
       context: .
       args:
         USER_UID: ${USER_UID:-1000}
         USER_GID: ${USER_GID:-1000}
-    image: claude-code-dev:latest
+    image: cc-container-dev:latest
     command: ["sleep", "infinity"]
     stdin_open: true
     tty: true
-    working_dir: /workspace
+    working_dir: /workspace/${SESSION_NAME:?SESSION_NAME must be set (launched via cc-container, which always sets it)}
     labels:
       - "claude-code.session=${SESSION_NAME:-default}"
 
@@ -42,7 +42,7 @@ services:
       start_period: 5s
 
     volumes:
-      - ${DEV_DIR:-./workspace}:/workspace
+      - ${DEV_DIR:-./workspace}:/workspace/${SESSION_NAME:?SESSION_NAME must be set (launched via cc-container, which always sets it)}
       - claude-config:/home/claude/.claude
     # Injects KEY=VALUE pairs from a host file straight into the container's
     # environment. The file itself is read by the `docker compose` CLI on
@@ -54,9 +54,16 @@ services:
       - ${SESSION_ENV_FILE:-/dev/null}
     environment:
       - CLAUDE_CONFIG_DIR=/home/claude/.claude
-      # Add project-specific allowed hosts by setting this before launch.sh,
-      # e.g.: EXTRA_ALLOWED_DOMAINS=example.com ./launch.sh ~/projects/foo
+      # Firewall defaults to "open" (any host, ports 80/443 only). Set
+      # FIREWALL_MODE=strict for the old default-deny domain-allowlist
+      # behavior, e.g.: FIREWALL_MODE=strict ./cc-container launch ~/projects/foo
+      - FIREWALL_MODE=${FIREWALL_MODE:-}
+      # strict mode only: add project-specific allowed hosts, e.g.:
+      #   FIREWALL_MODE=strict EXTRA_ALLOWED_DOMAINS=example.com ./cc-container launch ~/projects/foo
       - EXTRA_ALLOWED_DOMAINS=${EXTRA_ALLOWED_DOMAINS:-}
+      # Open specific additional ports (any destination) on demand, in
+      # either mode, e.g.: EXTRA_ALLOWED_PORTS=5432,22 ./cc-container launch ~/projects/foo
+      - EXTRA_ALLOWED_PORTS=${EXTRA_ALLOWED_PORTS:-}
 
     ports:
       - "${PORT1:-3000}:3000"

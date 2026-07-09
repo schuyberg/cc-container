@@ -87,7 +87,7 @@ cmd_setup() {
   export USER_UID="$(id -u)"
   export USER_GID="$(id -g)"
 
-  echo "Building the claude-code image (container user UID:GID = ${USER_UID}:${USER_GID})..."
+  echo "Building the cc-container image (container user UID:GID = ${USER_UID}:${USER_GID})..."
   docker compose build
 
   if ! docker volume inspect claude-code-auth &>/dev/null; then
@@ -106,7 +106,7 @@ cmd_setup() {
   echo
 
   DEV_DIR="$(pwd)/workspace" SESSION_NAME=login \
-    docker compose -p claude-code-login run --rm claude-code claude
+    docker compose -p claude-code-login run --rm cc-container claude
 
   docker compose -p claude-code-login down &>/dev/null || true
 
@@ -189,14 +189,18 @@ cmd_launch() {
   fi
 
   # If this session's container is already running, just attach to it.
-  if [ "$(docker compose -p "$project" ps -q claude-code 2>/dev/null)" != "" ] \
-     && [ "$(docker inspect -f '{{.State.Running}}' "$(docker compose -p "$project" ps -q claude-code)" 2>/dev/null)" = "true" ]; then
+  if [ "$(docker compose -p "$project" ps -q cc-container 2>/dev/null)" != "" ] \
+     && [ "$(docker inspect -f '{{.State.Running}}' "$(docker compose -p "$project" ps -q cc-container)" 2>/dev/null)" = "true" ]; then
     if [ -n "$env_file" ]; then
       echo "Note: --env-file is ignored when attaching to an already-running session." >&2
       echo "Run 'claude-code stop $session_name' first if you need to change its environment." >&2
     fi
+    if [ -n "${FIREWALL_MODE:-}${EXTRA_ALLOWED_DOMAINS:-}${EXTRA_ALLOWED_PORTS:-}" ]; then
+      echo "Note: FIREWALL_MODE/EXTRA_ALLOWED_DOMAINS/EXTRA_ALLOWED_PORTS are ignored when attaching to an already-running session (its firewall was set up at container creation)." >&2
+      echo "Run 'claude-code stop $session_name' first if you need to change its firewall config." >&2
+    fi
     echo "Session '$session_name' is already running — attaching..."
-    docker compose -p "$project" exec --user claude claude-code claude "${claude_args[@]+"${claude_args[@]}"}"
+    docker compose -p "$project" exec --user claude cc-container claude "${claude_args[@]+"${claude_args[@]}"}"
     return
   fi
 
@@ -224,7 +228,7 @@ cmd_launch() {
   SESSION_ENV_FILE="$session_env_file" \
     docker compose -p "$project" up -d --wait
 
-  docker compose -p "$project" exec --user claude claude-code claude "${claude_args[@]+"${claude_args[@]}"}"
+  docker compose -p "$project" exec --user claude cc-container claude "${claude_args[@]+"${claude_args[@]}"}"
 }
 
 cmd_shell() {
@@ -240,12 +244,12 @@ cmd_shell() {
   local session_name="$1"
   local project="claude-${session_name}"
 
-  if [ "$(docker compose -p "$project" ps -q claude-code 2>/dev/null)" = "" ]; then
+  if [ "$(docker compose -p "$project" ps -q cc-container 2>/dev/null)" = "" ]; then
     echo "Session '$session_name' isn't running. Start it first with: claude-code launch ..." >&2
     exit 1
   fi
 
-  docker compose -p "$project" exec --user claude claude-code bash
+  docker compose -p "$project" exec --user claude cc-container bash
 }
 
 cmd_network() {
@@ -261,7 +265,7 @@ cmd_network() {
   local session_name="$1" network_name="$2"
   local project="claude-${session_name}"
   local container_id
-  container_id="$(docker compose -p "$project" ps -q claude-code 2>/dev/null)"
+  container_id="$(docker compose -p "$project" ps -q cc-container 2>/dev/null)"
 
   if [ -z "$container_id" ]; then
     echo "Session '$session_name' isn't running. Start it first with: claude-code launch ..." >&2
