@@ -186,6 +186,28 @@ It reuses the same shared `claude-code-auth` volume as the standalone
 setup, so it's already logged in as long as you've run `cc-container setup`
 at least once anywhere on the machine.
 
+**Reconnecting later:** `docker compose up -d` is idempotent — it starts
+the container if it's stopped and no-ops instantly if it's already
+running — so the same two commands work whether this is the first
+connection or a reconnect:
+
+```bash
+docker compose up -d
+docker compose exec --user claude cc-container claude --continue
+```
+
+(Omit `--continue` on the very first run, since there's no conversation
+yet to continue.) A shell function saves you from remembering the pair,
+e.g. in `.bashrc`/`.zshrc`:
+
+```bash
+ccdev() { docker compose up -d && docker compose exec --user claude cc-container claude --continue "$@"; }
+```
+
+Then `ccdev` from the project directory connects or reconnects either way.
+Use `docker compose ps` to check whether the session is currently running,
+and `docker compose down` to stop and remove it.
+
 ### Option B: attach a running session to an existing network
 
 If you'd rather keep using `cc-container launch` as usual and just need
