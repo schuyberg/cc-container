@@ -43,6 +43,37 @@ boundary against a determined kernel exploit. Treat either mode as raising
 the bar substantially, not as an absolute guarantee — don't run untrusted
 code with `--dangerously-skip-permissions` expecting zero risk.
 
+### Claude can see anything in its own container
+
+Claude Code's Bash tool runs as the `claude` user *inside* this same
+container — it isn't a separate, more restricted process. That means:
+
+- **Every environment variable** present in the container is visible to
+  Claude, however it got there — `environment:` in a compose file,
+  `--env-file`/`SESSION_ENV_FILE` (see below), or anything inherited from a
+  parent process. Claude can read it with `env`, `printenv`, or anything
+  else its Bash tool runs, not just with your own scripts.
+- **Every file under a mounted path** (`/workspace`, or any extra bind
+  mount) is readable by Claude's Read/Grep/Glob/Bash tools regardless of
+  host file permissions, `.gitignore`, or whether it's tracked in git.
+
+`launch --env-file <path>` (`SESSION_ENV_FILE` in `docker-compose.yml`)
+loads `KEY=VALUE` pairs from a host file straight into the container's
+environment, without ever bind-mounting that file into `/workspace`:
+
+```bash
+./cc-container launch ~/projects/foo --env-file ~/secrets/foo.env
+```
+
+This is worth doing — it keeps a secret off disk under `/workspace`, out of
+git, and away from casual file browsing. But it does **not** hide the
+secret from Claude itself: once it's an env var in this container, Claude's
+Bash tool can read it just as easily as your own shell could. If a secret
+needs to stay genuinely invisible to Claude — not just off disk — it can't
+be injected into this container at all; see [Keeping secrets private from
+Claude](#keeping-secrets-private-from-claude) below for a pattern that
+achieves that.
+
 ## First-time setup (once per machine)
 
 ```bash
@@ -226,6 +257,76 @@ containers by their service name (e.g. `db:5432`).
 
 This attachment doesn't persist across `stop`/`launch` cycles — re-run
 `cc-container network` after restarting a session if you need it again.
+
+## Keeping secrets private from Claude
+
+As covered [above](#claude-can-see-anything-in-its-own-container), any
+secret that lands in this container's environment or filesystem is visible
+to Claude — `--env-file` only keeps it off disk and out of git, not out of
+Claude's reach. The only way to keep a secret genuinely invisible to Claude
+is to never give this container the secret at all, and instead put it only
+on the service that actually needs it.
+
+**The line that matters:** does Claude itself need to *use* the credential
+(run `psql` with it, call a paid API directly from a script it writes), or
+does some other service use it *on Claude's behalf* (a backend process
+that Claude only talks to over HTTP)? Only the second case can be made
+fully private — if Claude has to present the credential itself to make
+something work, it will see that credential, and no container boundary
+changes that.
+
+For the "on Claude's behalf" case, extend the [multi-container
+pattern](#option-a-embed-the-service-in-the-projects-own-docker-composeyml-recommended)
+from above: put the secret only in `environment:`/`env_file:` on the
+service that needs it, give `cc-container` no such variable, and have
+Claude reach that service by its Compose service name instead of a raw
+credential. For example, a `backend` service that calls a paid third-party
+API:
+
+```yaml
+services:
+  backend:
+    build: ./backend
+    env_file:
+      - ./backend/.env.secret   # holds THIRD_PARTY_API_KEY; never committed
+    # no ports: needed unless the host also needs direct access
+
+  cc-container:
+    build:
+      context: ../cc-container-docker
+      args:
+        USER_UID: ${USER_UID:-1000}
+        USER_GID: ${USER_GID:-1000}
+    # ...same as project-docker-compose.yml...
+    # deliberately NOT given THIRD_PARTY_API_KEY, or any env_file containing it
+    depends_on: [backend]
+```
+
+Claude can now run `curl http://backend:8000/some-endpoint` to exercise
+functionality that depends on the key, and can read `backend`'s source
+code to understand what it does with it, but the key's *value* never
+appears anywhere in `cc-container`'s environment or mounted files —
+`env`, `printenv`, and `/workspace` all come up empty for it. Docker
+containers don't share process namespaces or each other's environments by
+default, and `cc-container` has no `docker exec`/`docker inspect` access
+into `backend` (no Docker socket is mounted), so there's no route from one
+container to the other's environment short of `backend` handing the value
+back over the network itself.
+
+For the unavoidable case — Claude genuinely needs a working credential
+(e.g. a database password to run migrations) — you can't hide the value,
+but you can shrink the blast radius:
+
+- Use a **dev-only credential**, scoped to a disposable resource (a local
+  `db` container, a sandbox/test API key), never the same one used in
+  staging or production.
+- Pair it with `FIREWALL_MODE=strict` (see [Locking a session down
+  further](#locking-a-session-down-further)) so that even if Claude tried
+  to exfiltrate the value, only an explicit allowlist of hosts is
+  reachable at all.
+- Prefer a role/key with the minimum privilege the task actually needs
+  (e.g. a Postgres role that can only touch a scratch database) over
+  reusing an admin credential.
 
 ## Notes
 
