@@ -1,5 +1,5 @@
 # Claude Code development container — hardened variant
-FROM node:20-slim
+FROM node:22-slim
 
 ARG USERNAME=claude
 ARG USER_UID=1000
