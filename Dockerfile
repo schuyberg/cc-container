@@ -5,7 +5,11 @@ ARG USERNAME=claude
 ARG USER_UID=1000
 ARG USER_GID=$USER_UID
 
-# iptables/getent for the outbound firewall, gosu to drop root cleanly
+# iptables/getent for the outbound firewall, gosu to drop root cleanly.
+# chromium: headless browser for debugging browser-driven apps (drive it
+# with Playwright's Node driver, installed below, pointed at
+# /usr/bin/chromium via executablePath — cap_drop: ALL in compose means
+# Chromium's own sandbox can't be used, so launch with --no-sandbox).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
@@ -18,6 +22,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-venv \
+    chromium \
     && rm -rf /var/lib/apt/lists/*
 
 # Non-root user. UID/GID default to 1000 but should be built to match your
@@ -41,6 +46,13 @@ RUN \
 # scan the entire filesystem, which can hang or eat memory.
 WORKDIR /tmp
 RUN npm install -g @anthropic-ai/claude-code
+
+# Playwright's Node driver for the apt-installed Chromium above. Skip
+# Playwright's own browser download (PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1) -
+# we already have a browser binary at /usr/bin/chromium and don't need a
+# second copy; pass executablePath to chromium.launch() to use it.
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+RUN npm install -g playwright
 
 # npm install -g runs as root, so the global install tree comes out
 # root-owned (0755) with no group/other write bit. Since the claude user has
