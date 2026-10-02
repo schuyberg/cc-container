@@ -45,7 +45,7 @@ RUN \
 # Install from /tmp, not /. Installing as root from / makes the installer
 # scan the entire filesystem, which can hang or eat memory.
 WORKDIR /tmp
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g @anthropic-ai/claude-code opencode-ai
 
 # Playwright's Node driver for the apt-installed Chromium above. Skip
 # Playwright's own browser download (PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1) -
@@ -68,11 +68,18 @@ RUN chmod +x /usr/local/bin/init-firewall.sh /usr/local/bin/entrypoint.sh
 WORKDIR /workspace
 RUN chown "$USERNAME:$USERNAME" /workspace
 
-# Pre-create the auth config dir owned by the claude user. Docker copies a
+# Pre-create the auth/config dirs owned by the claude user. Docker copies a
 # named volume's mount point from the image on first use (when the volume is
 # empty), so this ensures fresh volumes start with the right ownership instead
-# of root:root.
-RUN mkdir -p /home/"$USERNAME"/.claude && chown "$USERNAME:$USERNAME" /home/"$USERNAME"/.claude
+# of root:root. Covers both agents: Claude Code keys everything (auth +
+# settings) off ~/.claude; opencode splits it into an XDG data dir (auth.json)
+# and XDG config dir (opencode.json, themes, etc).
+RUN mkdir -p /home/"$USERNAME"/.claude \
+             /home/"$USERNAME"/.local/share/opencode \
+             /home/"$USERNAME"/.config/opencode \
+    && chown -R "$USERNAME:$USERNAME" /home/"$USERNAME"/.claude \
+                                       /home/"$USERNAME"/.local \
+                                       /home/"$USERNAME"/.config
 
 # Container starts as root (needed to set up the firewall via NET_ADMIN),
 # then entrypoint.sh drops to the non-root user for everything else.

@@ -9,11 +9,13 @@ if [ "$(id -u)" = "0" ]; then
     fi
   fi
 
-  # Fix ownership of the persisted auth volume on first run / after a
-  # UID change, so the non-root user can read and write it.
-  if [ -d /home/claude/.claude ]; then
-    chown -R claude:claude /home/claude/.claude 2>/dev/null || true
-  fi
+  # Fix ownership of the persisted auth/config volumes on first run / after
+  # a UID change, so the non-root user can read and write them.
+  for dir in /home/claude/.claude /home/claude/.local/share/opencode /home/claude/.config/opencode; do
+    if [ -d "$dir" ]; then
+      chown -R claude:claude "$dir" 2>/dev/null || true
+    fi
+  done
 
   # Signal that root-phase setup (firewall + chown) is done. The compose
   # healthcheck waits for this file so that 'up -d --wait' doesn't return

@@ -1,28 +1,35 @@
-# Claude Code in Docker — hardened, multi-session setup
+# Claude Code / opencode in Docker — hardened, multi-session setup
 
 ---
 
-A containerized environment for running Claude Code. Project code is included in a mounted volume, and the container is hardened to improve security. This is not foolproof, but is somewhat more secure than running claude code directly on the host system.
+A containerized environment for running Claude Code and/or
+[opencode](https://opencode.ai). Project code is included in a mounted
+volume, and the container is hardened to improve security. This is not
+foolproof, but is somewhat more secure than running either agent directly on
+the host system.
 
 The following documentation and project code is AI-Generated (Claude Sonnet 5).
 
 ----
 
 
-Node + Claude Code, launched per-project on demand, with several layers of
-containment: a non-root user, an ephemeral filesystem, dropped Linux
-capabilities, and an outbound firewall (open to any host on ports 80/443 by
-default, or a strict domain allowlist on request). Any number of sessions
-can run concurrently, each mounting a different directory, sharing one
-login.
+Node + Claude Code + opencode, launched per-project on demand, with several
+layers of containment: a non-root user, an ephemeral filesystem, dropped
+Linux capabilities, and an outbound firewall (open to any host on ports
+80/443 by default, or a strict domain allowlist on request). Any number of
+sessions can run concurrently, each mounting a different directory, sharing
+one login per agent. Both agents are installed in every image; which one
+actually runs in a given session is picked per-attach with `--agent`, not
+baked into the container at build/launch time (see [Choosing an
+agent](#choosing-an-agent-claude-code-vs-opencode) below).
 
 ## What's containing what
 
 | Risk | Mitigation |
 |---|---|
 | Writes outside the project | The container filesystem is writable but ephemeral — its overlay layer is discarded on `docker compose down`. Only `/workspace` (your project) and the auth volume actually persist across sessions. |
-| Malicious code running with elevated privilege | Process runs as a non-root user with no `sudo`. `cap_drop: ALL` removes every Linux capability except the two (`NET_ADMIN`, `NET_RAW`) needed transiently by root at startup to configure the firewall — the actual `claude` process never has them. `no-new-privileges` blocks privilege escalation via setuid binaries. |
-| Data exfiltration / pulling down more payloads | `init-firewall.sh` sets an outbound firewall. By default, any host is reachable but only on ports 80/443 (web browsing, search grounding, APIs) — every other port is dropped. `FIREWALL_MODE=strict` switches to a default-deny domain allowlist (Anthropic's API, `claude.ai`, common package/git registries) instead. |
+| Malicious code running with elevated privilege | Process runs as a non-root user with no `sudo`. `cap_drop: ALL` removes every Linux capability except the two (`NET_ADMIN`, `NET_RAW`) needed transiently by root at startup to configure the firewall — the actual `claude`/`opencode` process never has them. `no-new-privileges` blocks privilege escalation via setuid binaries. |
+| Data exfiltration / pulling down more payloads | `init-firewall.sh` sets an outbound firewall. By default, any host is reachable but only on ports 80/443 (web browsing, search grounding, APIs) — every other port is dropped. `FIREWALL_MODE=strict` switches to a default-deny domain allowlist (Anthropic's API, `claude.ai`, `opencode.ai`/`models.dev`, common package/git registries) instead — see the caveat about non-Anthropic providers under [Locking a session down further](#locking-a-session-down-further). |
 | Fork bombs / resource exhaustion | `mem_limit` and `pids_limit` cap what one session can consume. |
 | One project's session compromising another | Already true from the multi-session design — each project gets its own container, network, and ports; only the login is shared. |
 
@@ -44,6 +51,15 @@ the bar substantially, not as an absolute guarantee — don't run untrusted
 code with `--dangerously-skip-permissions` expecting zero risk.
 
 ### Claude can see anything in its own container
+
+Everything in this section applies equally to opencode — both agents' Bash
+tools run as the same `claude` user inside the same container, with the same
+view of env vars and mounted files. The permission-prompt/auto-approve
+details discussed later (e.g. `--dangerously-skip-permissions`) are specific
+to Claude Code's flag names; opencode has its own, differently-named
+permission system (allow/ask/deny rules, plus its own auto-approve flag) —
+check `opencode`'s own docs for the current equivalent rather than assuming
+the flag names below carry over.
 
 Claude Code's Bash tool runs as the `claude` user *inside* this same
 container — it isn't a separate, more restricted process. That means:
@@ -108,6 +124,25 @@ Auto-named session, auto-picked free ports, already logged in, runs
 concurrently with any other session. Running `launch` again on a directory
 whose session is already up just attaches to it.
 
+## Choosing an agent: Claude Code vs opencode
+
+Both agents are installed in every image. `launch` runs Claude Code by
+default; pass `--agent opencode` to run opencode instead:
+
+```bash
+./cc-container launch ~/projects/sooke-live --agent opencode
+```
+
+The choice is per-attach, not baked into the container — the same running
+session can be attached to with either agent on different `launch` calls
+(e.g. to try both against the same project), since it's just which binary
+gets exec'd into the already-running container. Each agent keeps its own
+conversation/session history, so switching agents mid-project starts that
+agent fresh rather than picking up the other one's context.
+
+`--continue`/fresh-session semantics (the `--new` flag) work the same way
+for both, since both CLIs accept a `--continue` flag.
+
 ## Managing sessions
 
 ```bash
@@ -117,7 +152,7 @@ whose session is already up just attaches to it.
 ```
 
 `shell` attaches to a running session with a bash shell instead of
-launching `claude` — handy for poking around, running one-off commands, or
+launching an agent — handy for poking around, running one-off commands, or
 debugging the container itself. Like `launch`'s attach path, it runs as
 the `claude` user, not root.
 
@@ -131,9 +166,14 @@ particular session should be restricted to a named set of hosts instead
 FIREWALL_MODE=strict ./cc-container launch ~/projects/foo
 ```
 
-Strict mode allows only Anthropic's API, `claude.ai`, and common
-package/git registries (npm, PyPI, GitHub) by default. Add more hosts to
-that session with `EXTRA_ALLOWED_DOMAINS`:
+Strict mode allows only Anthropic's API, `claude.ai`, `opencode.ai`/
+`models.dev` (opencode's own auth/model-list endpoints), and common
+package/git registries (npm, PyPI, GitHub) by default. Note this only
+covers Anthropic as a *model provider* — if a session runs opencode
+configured against a different provider (OpenAI, Google, OpenRouter, a
+self-hosted endpoint, etc.), add that provider's API host via
+`EXTRA_ALLOWED_DOMAINS` too, or requests to it will be dropped. Add more
+hosts to that session with `EXTRA_ALLOWED_DOMAINS`:
 
 ```bash
 FIREWALL_MODE=strict EXTRA_ALLOWED_DOMAINS=my-registry.example.com ./cc-container launch ~/projects/foo
@@ -156,6 +196,76 @@ EXTRA_ALLOWED_PORTS=5432,22 ./cc-container launch ~/projects/foo
 For a project's *own* backing services, prefer the Compose-network
 approaches below instead — they don't require opening a port to the whole
 internet.
+
+## Using a local Ollama model with opencode
+
+opencode can talk to a locally-running [Ollama](https://ollama.com) server
+on your host machine instead of a hosted provider. Two things need setting
+up beyond opencode's own config, both specific to running inside this
+container:
+
+1. **Make Ollama reachable from the container.** By default `ollama serve`
+   only binds `127.0.0.1` on the host, which is unreachable from the
+   container's own network namespace. Bind it more broadly instead:
+   ```bash
+   OLLAMA_HOST=0.0.0.0 ollama serve
+   ```
+2. **Open the port for the session.** The firewall only allows 80/443 by
+   default; Ollama's port (11434) needs an explicit opt-in via
+   `EXTRA_ALLOWED_PORTS` (see [Opening a non-web
+   port](#opening-a-non-web-port) above), which works in both
+   `FIREWALL_MODE=open` and `strict`:
+   ```bash
+   EXTRA_ALLOWED_PORTS=11434 ./cc-container launch ~/projects/foo --agent opencode
+   ```
+
+`docker-compose.yml` already maps `host.docker.internal` to the host
+machine (`extra_hosts: host.docker.internal:host-gateway`), so from inside
+the container Ollama is reachable at `http://host.docker.internal:11434`.
+
+Then write opencode's config to point at it. Since this is a machine-wide
+setup rather than a per-project one, put it in the **global** config
+(`~/.config/opencode/opencode.json`, persisted via the `opencode-config`
+volume — see [Notes](#notes) — so every session picks it up automatically,
+not just the one you set it up from). From any session:
+
+```bash
+./cc-container shell foo
+vim ~/.config/opencode/opencode.json
+```
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "ollama": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Ollama (local)",
+      "options": {
+        "baseURL": "http://host.docker.internal:11434/v1"
+      },
+      "models": {
+        "<your-model-tag>": {}
+      }
+    }
+  }
+}
+```
+
+Run `ollama list` on the host to get the exact tag(s) to put under
+`models`. No `apiKey` is needed — local Ollama doesn't require auth.
+
+Once saved, pick "Ollama (local)" from opencode's model switcher, or run
+one-shot with:
+
+```bash
+opencode run -m ollama/<your-model-tag> "..."
+```
+
+(If it can't connect, double-check step 1 — `curl
+http://localhost:11434/api/tags` from the *host* should list your models;
+if that hangs or refuses, Ollama isn't listening on the right interface
+yet.)
 
 ## Connecting to a project's own services (e.g. a database)
 
@@ -211,11 +321,12 @@ Then, from that project's directory:
 docker compose build
 docker compose up -d
 docker compose exec --user claude cc-container claude
+# or: docker compose exec --user claude cc-container opencode
 ```
 
-It reuses the same shared `claude-code-auth` volume as the standalone
-setup, so it's already logged in as long as you've run `cc-container setup`
-at least once anywhere on the machine.
+It reuses the same shared `claude-code-auth`/`opencode-data` volumes as the
+standalone setup, so it's already logged in as long as you've run
+`cc-container setup` at least once anywhere on the machine.
 
 **Reconnecting later:** `docker compose up -d` is idempotent — it starts
 the container if it's stopped and no-ops instantly if it's already
@@ -410,13 +521,16 @@ but you can shrink the blast radius:
 ## Notes
 
 - **Shared auth, separate everything else.** All sessions log in as the
-  same Claude account (one volume, `claude-code-auth`). Project files,
-  ports, containers, and firewalls are isolated per session.
+  same Claude account (`claude-code-auth` volume) and the same opencode
+  provider credentials (`opencode-data`/`opencode-config` volumes). Project
+  files, ports, containers, and firewalls are isolated per session.
 - **Non-interactive/CI use** still needs a token instead of the TTY login:
-  run `claude setup-token` once and pass the result in as
-  `CLAUDE_CODE_OAUTH_TOKEN`.
+  for Claude Code, run `claude setup-token` once and pass the result in as
+  `CLAUDE_CODE_OAUTH_TOKEN`; for opencode, set the relevant provider's API
+  key env var (e.g. `ANTHROPIC_API_KEY`) via `--env-file`/`SESSION_ENV_FILE`
+  instead of `opencode auth login`.
 - Rebuilding the image (`docker compose build`) doesn't touch the auth
-  volume, so Claude Code/Node upgrades don't force a re-login.
+  volumes, so Claude Code/opencode/Node upgrades don't force a re-login.
 - If a session ever needs a genuinely unrestricted shell (e.g. debugging
   the firewall itself), you can temporarily comment out the `cap_drop`
   block in `docker-compose.yml` for that container — just remember to put

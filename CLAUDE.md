@@ -12,8 +12,8 @@ CLI script plus the Docker image/compose configs it drives. `plrep/` and
 ## Commands
 
 ```bash
-./cc-container setup                          # one-time: build image, create auth volume, log in
-./cc-container launch <dev-dir> [session-name] [--new] [--env-file <path>]  # start or attach to a session
+./cc-container setup                          # one-time: build image, create auth volumes, log in to both agents
+./cc-container launch <dev-dir> [session-name] [--new] [--env-file <path>] [--agent claude|opencode]  # start or attach to a session
 ./cc-container list                             # show running sessions
 ./cc-container stop <session-name>              # stop and remove a session
 ./cc-container network <session-name> <docker-network-name>  # attach a running session to another network
@@ -30,32 +30,40 @@ run `claude`.
   `launch`, `list`, `stop`, `network`) shells out to `docker compose` with a
   per-session project name (`claude-<session-name>`), so every session is its
   own isolated Compose project (own containers, network, ports), all sharing
-  one login volume. `launch` auto-picks free host ports starting at
+  the login volumes. `launch` auto-picks free host ports starting at
   3000/5173/8080/8000 (incrementing per concurrent session), resumes the
-  session's last `claude` conversation via `--continue` unless `--new` is
-  passed, and re-attaches instead of restarting if the session's container
-  is already up (in which case `--env-file` is ignored — env vars are fixed
-  at container creation, so changing them requires `stop` + relaunch).
-  `--env-file <path>` sets `SESSION_ENV_FILE`, consumed by
+  session's last conversation via the chosen agent's `--continue` unless
+  `--new` is passed, and re-attaches instead of restarting if the session's
+  container is already up (in which case `--env-file` is ignored — env vars
+  are fixed at container creation, so changing them requires `stop` +
+  relaunch). `--env-file <path>` sets `SESSION_ENV_FILE`, consumed by
   `docker-compose.yml`'s `env_file:` directive to inject secrets as
   container env vars without ever bind-mounting the file into /workspace.
-- **`Dockerfile`** — Node 20 slim image with Claude Code installed globally.
-  Builds a non-root `claude` user with UID/GID passed in as build args
+  `--agent claude|opencode` (default `claude`) picks which CLI actually gets
+  exec'd into the container via `exec_agent()` — both binaries are always
+  installed, so this is a per-`launch`-call choice, not something fixed at
+  container creation; the same running session can be attached to with
+  either agent across different `launch` calls.
+- **`Dockerfile`** — Node 22 slim image with both Claude Code
+  (`@anthropic-ai/claude-code`) and opencode (`opencode-ai`) installed
+  globally, as the `claude`/`opencode` binaries respectively. Builds a
+  non-root `claude` user with UID/GID passed in as build args
   (`USER_UID`/`USER_GID`, set from the host user by `cc-container setup`/
   `launch`) so bind-mounted project files come out host-owned, not owned by
   an arbitrary container UID.
 - **`entrypoint.sh`** — container always starts as root (only to get
   `NET_ADMIN`/`NET_RAW` for firewall setup), runs `init-firewall.sh`, fixes
-  ownership of the persisted auth volume, then uses `gosu` to drop to the
-  non-root `claude` user permanently for the actual process. There is no
-  `sudo` back to root from that point.
+  ownership of the persisted auth/config volumes (Claude Code's and
+  opencode's), then uses `gosu` to drop to the non-root `claude` user
+  permanently for the actual process. There is no `sudo` back to root from
+  that point.
 - **`init-firewall.sh`** — outbound firewall via `iptables`, two modes.
   Default (`FIREWALL_MODE=open` or unset): any host is reachable on ports
   80/443 only (web browsing, search grounding, arbitrary APIs), every other
   port is dropped. `FIREWALL_MODE=strict` switches to the old default-deny
   behavior — only an explicit allowlist of domains (Anthropic API/
-  claude.ai, npm/PyPI/GitHub by default, resolved to IPs at container
-  start) is permitted on 80/443, extended per-session via
+  claude.ai, opencode.ai/models.dev, npm/PyPI/GitHub by default, resolved
+  to IPs at container start) is permitted on 80/443, extended per-session via
   `EXTRA_ALLOWED_DOMAINS`. In either mode, `EXTRA_ALLOWED_PORTS` opens
   specific additional ports to any destination on demand (e.g. a project
   DB or SSH). It's DNS-snapshot/port-based, not a content-inspecting proxy.
@@ -64,9 +72,17 @@ run `claude`.
   `CHOWN` (for fixing auth volume ownership) added back, `no-new-privileges`,
   and `mem_limit`/`pids_limit` caps. The container filesystem is writable but
   ephemeral (overlay layer is discarded on `docker compose down`); only
-  `/workspace` and the `claude-config` auth volume persist across sessions.
-  The `claude-config` volume (external, `claude-code-auth`) is what makes
-  login shared across all sessions while everything else stays per-session.
+  `/workspace` and the agent auth volumes persist across sessions. The
+  `claude-config` volume (external volume name `claude-code-auth`, mounted
+  at `/home/claude/.claude`) is what makes Claude Code's login shared across
+  all sessions; `opencode-data`/`opencode-config` (external volume names
+  `opencode-data`/`opencode-config`, mounted at
+  `/home/claude/.local/share/opencode` and `/home/claude/.config/opencode`
+  — opencode's XDG data/config split) do the same for opencode. Everything
+  else stays per-session. `extra_hosts: host.docker.internal:host-gateway`
+  gives sessions a stable hostname for the host machine (e.g. a locally-run
+  Ollama server) — it's just a `/etc/hosts` entry, actual reachability is
+  still gated by the firewall (`EXTRA_ALLOWED_PORTS`).
   The dev dir is bind-mounted (and `working_dir` set) to
   `/workspace/${SESSION_NAME}`, not plain `/workspace` — Claude Code keys a
   session's resumable conversation history (inside the shared `claude-config`
@@ -93,8 +109,12 @@ run `claude`.
   allowlist) rather than that becoming the new default for every session. A
   session that needs a non-web port (e.g. a DB) should use
   `EXTRA_ALLOWED_PORTS` at launch time rather than hardcoding into
-  `init-firewall.sh`.
-- Only `/workspace` and `/home/claude/.claude` persist across sessions. The
+  `init-firewall.sh`. Reaching a service on the host machine itself (e.g. a
+  local Ollama server) follows the same pattern: connect to
+  `host.docker.internal` (already mapped via `extra_hosts`) and open its
+  port with `EXTRA_ALLOWED_PORTS` at launch time.
+- Only `/workspace`, `/home/claude/.claude`, `/home/claude/.local/share/opencode`,
+  and `/home/claude/.config/opencode` persist across sessions. The
   rest of the container filesystem is ephemeral (discarded on `docker compose
   down`) — don't design changes that assume other paths survive a restart.
 - `docker compose exec` does **not** run the image's `ENTRYPOINT`, so it

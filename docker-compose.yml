@@ -13,6 +13,13 @@ services:
     labels:
       - "claude-code.session=${SESSION_NAME:-default}"
 
+    # Stable hostname for "the host machine", e.g. to reach a locally-running
+    # Ollama server from opencode. Just a /etc/hosts entry — doesn't open any
+    # network access by itself, the firewall still gates the actual
+    # connection (see EXTRA_ALLOWED_PORTS below).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     # --- Containment ---
     cap_drop:
       - ALL
@@ -44,6 +51,10 @@ services:
     volumes:
       - ${DEV_DIR:-./workspace}:/workspace/${SESSION_NAME:?SESSION_NAME must be set (launched via cc-container, which always sets it)}
       - claude-config:/home/claude/.claude
+      # opencode's equivalents of claude-config: auth.json (login) lives in
+      # the XDG data dir, opencode.json/themes/etc in the XDG config dir.
+      - opencode-data:/home/claude/.local/share/opencode
+      - opencode-config:/home/claude/.config/opencode
     # Injects KEY=VALUE pairs from a host file straight into the container's
     # environment. The file itself is read by the `docker compose` CLI on
     # the host and is never bind-mounted or copied into the container, so it
@@ -75,3 +86,9 @@ volumes:
   claude-config:
     external: true
     name: claude-code-auth
+  opencode-data:
+    external: true
+    name: opencode-data
+  opencode-config:
+    external: true
+    name: opencode-config

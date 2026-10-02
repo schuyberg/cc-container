@@ -19,7 +19,7 @@ set -euo pipefail
 
 FIREWALL_MODE="${FIREWALL_MODE:-open}"
 
-DEFAULT_DOMAINS="api.anthropic.com,claude.ai,statsig.anthropic.com,registry.npmjs.org,registry.yarnpkg.com,pypi.org,files.pythonhosted.org,github.com,api.github.com,raw.githubusercontent.com,codeload.github.com,objects.githubusercontent.com"
+DEFAULT_DOMAINS="api.anthropic.com,claude.ai,statsig.anthropic.com,opencode.ai,models.dev,registry.npmjs.org,registry.yarnpkg.com,pypi.org,files.pythonhosted.org,github.com,api.github.com,raw.githubusercontent.com,codeload.github.com,objects.githubusercontent.com"
 
 iptables -F OUTPUT
 

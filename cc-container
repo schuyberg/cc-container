@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Claude Code Docker — single entry point.
+# Claude Code / opencode Docker — single entry point.
+#
+# Both agents are installed in the same image; which one actually runs in a
+# session is chosen per-attach with --agent, not baked into the container.
 #
 # Usage:
 #   claude-code setup                          one-time: build image, create
-#                                               auth volume, log in
+#                                               auth volumes, log in to both
+#                                               agents
 #   claude-code launch <dev-dir> [session-name] [--new] [--env-file <path>]
-#                                               start/attach a session,
+#     [--agent claude|opencode]                start/attach a session,
 #                                               resuming the last
 #                                               conversation unless --new
+#                                               (default agent: claude)
 #   claude-code shell <session-name>           attach with a bash shell
 #   claude-code list                           show running sessions
 #   claude-code stop <session-name>            stop and remove a session
@@ -27,13 +32,18 @@ Usage: claude-code <command> [args]
 
 Commands:
   setup                           One-time: build image, create shared auth
-                                   volume, and log in to Claude Code.
+                                   volumes, and log in to both Claude Code
+                                   and opencode.
   launch <dev-dir> [session-name] Start a session mounting <dev-dir>, or
     [--new]                       attach to it if already running. Multiple
     [--env-file <path>]           sessions can run concurrently. Resumes the
-                                   last conversation (claude --continue)
+    [--agent claude|opencode]     last conversation (agent's --continue)
                                    unless --new is passed, which starts a
-                                   fresh conversation instead. --env-file
+                                   fresh conversation instead. --agent picks
+                                   which CLI to run in the session (default:
+                                   claude) — both are always installed, so
+                                   this can differ between launch calls on
+                                   the same running session. --env-file
                                    loads KEY=VALUE pairs from <path> (which
                                    should live outside <dev-dir>) straight
                                    into the container's environment, without
@@ -42,7 +52,7 @@ Commands:
                                    container, not when attaching to one
                                    already running.
   shell <session-name>            Attach to a running session with a bash
-                                   shell instead of launching claude.
+                                   shell instead of launching an agent.
   list                            List currently running sessions.
   stop <session-name>             Stop and remove a session's container.
   network <session-name> <net>    Attach a running session's container to
@@ -53,6 +63,7 @@ Examples:
   claude-code setup
   claude-code launch ~/projects/sooke-live
   claude-code launch ~/projects/dot-tally dot-tally
+  claude-code launch ~/projects/dot-tally dot-tally --agent opencode
   claude-code shell sooke-live
   claude-code list
   claude-code network sooke-live sooke-live_default
@@ -81,21 +92,22 @@ find_free_port() {
   echo "$port"
 }
 
-# Run `claude` in a session's container. If it was invoked with args (e.g.
-# --continue) and exits non-zero — e.g. the CLI's "No conversation found to
-# continue" when the session has no prior history yet — fall back to a
-# plain `claude` invocation to start a fresh conversation instead.
-exec_claude() {
-  local project="$1"
-  shift
+# Run an agent binary (claude or opencode) in a session's container. If it
+# was invoked with args (e.g. --continue) and exits non-zero — e.g. "No
+# conversation found to continue" when the session has no prior history yet
+# — fall back to a plain invocation to start a fresh conversation instead.
+# Both agents accept --continue, so this fallback logic is shared.
+exec_agent() {
+  local project="$1" agent="$2"
+  shift 2
   local status=0
-  docker compose -p "$project" exec --user claude cc-container claude "$@" || status=$?
+  docker compose -p "$project" exec --user claude cc-container "$agent" "$@" || status=$?
   if [ "$status" -eq 0 ]; then
     return 0
   fi
   if [ $# -gt 0 ]; then
     echo "No previous conversation found for this session — starting a new one." >&2
-    docker compose -p "$project" exec --user claude cc-container claude
+    docker compose -p "$project" exec --user claude cc-container "$agent"
     return $?
   fi
   return "$status"
@@ -111,10 +123,12 @@ cmd_setup() {
   echo "Building the cc-container image (container user UID:GID = ${USER_UID}:${USER_GID})..."
   docker compose build
 
-  if ! docker volume inspect claude-code-auth &>/dev/null; then
-    echo "Creating shared auth volume 'claude-code-auth'..."
-    docker volume create claude-code-auth
-  fi
+  for vol in claude-code-auth opencode-data opencode-config; do
+    if ! docker volume inspect "$vol" &>/dev/null; then
+      echo "Creating shared volume '$vol'..."
+      docker volume create "$vol"
+    fi
+  done
 
   mkdir -p ./workspace
 
@@ -132,8 +146,23 @@ cmd_setup() {
   docker compose -p claude-code-login down &>/dev/null || true
 
   echo
+  echo "Starting a temporary session to log in to opencode."
+  echo "It'll prompt you to pick a provider and paste an API key (or run"
+  echo "/connect from its TUI). This is stored in the shared 'opencode-data'"
+  echo "volume, so every session launched afterwards is already logged in."
+  echo "If you don't plan to use opencode yet, Ctrl+C/Ctrl+D out of this step"
+  echo "— you can run 'opencode auth login' from any session later instead."
+  echo
+
+  DEV_DIR="$(pwd)/workspace" SESSION_NAME=login \
+    docker compose -p claude-code-login run --rm cc-container opencode auth login || true
+
+  docker compose -p claude-code-login down &>/dev/null || true
+
+  echo
   echo "Setup complete. Start a session with:"
   echo "  claude-code launch /path/to/project [session-name]"
+  echo "  claude-code launch /path/to/project [session-name] --agent opencode"
 }
 
 cmd_launch() {
@@ -141,6 +170,7 @@ cmd_launch() {
 
   local new_session=false
   local env_file=""
+  local agent="claude"
   local positional=()
   while [ $# -gt 0 ]; do
     case "$1" in
@@ -150,10 +180,18 @@ cmd_launch() {
         ;;
       --env-file)
         if [ $# -lt 2 ]; then
-          echo "Usage: claude-code launch <dev-directory> [session-name] [--new] [--env-file <path>]" >&2
+          echo "Usage: claude-code launch <dev-directory> [session-name] [--new] [--env-file <path>] [--agent claude|opencode]" >&2
           exit 1
         fi
         env_file="$2"
+        shift 2
+        ;;
+      --agent)
+        if [ $# -lt 2 ]; then
+          echo "Usage: claude-code launch <dev-directory> [session-name] [--new] [--env-file <path>] [--agent claude|opencode]" >&2
+          exit 1
+        fi
+        agent="$2"
         shift 2
         ;;
       *)
@@ -164,8 +202,13 @@ cmd_launch() {
   done
   set -- "${positional[@]+"${positional[@]}"}"
 
+  if [ "$agent" != "claude" ] && [ "$agent" != "opencode" ]; then
+    echo "Unknown --agent '$agent'. Must be 'claude' or 'opencode'." >&2
+    exit 1
+  fi
+
   if [ $# -lt 1 ]; then
-    echo "Usage: claude-code launch <dev-directory> [session-name] [--new] [--env-file <path>]" >&2
+    echo "Usage: claude-code launch <dev-directory> [session-name] [--new] [--env-file <path>] [--agent claude|opencode]" >&2
     exit 1
   fi
 
@@ -184,8 +227,8 @@ cmd_launch() {
   local session_name="${2:-$(basename "$dev_dir" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' | sed 's/-*$//')}"
   local project="claude-${session_name}"
 
-  local claude_args=()
-  $new_session || claude_args=(--continue)
+  local agent_args=()
+  $new_session || agent_args=(--continue)
 
   # SESSION_ENV_FILE is read by docker-compose.yml's env_file directive,
   # which injects KEY=VALUE pairs into the container's environment without
@@ -220,8 +263,8 @@ cmd_launch() {
       echo "Note: FIREWALL_MODE/EXTRA_ALLOWED_DOMAINS/EXTRA_ALLOWED_PORTS are ignored when attaching to an already-running session (its firewall was set up at container creation)." >&2
       echo "Run 'claude-code stop $session_name' first if you need to change its firewall config." >&2
     fi
-    echo "Session '$session_name' is already running — attaching..."
-    exec_claude "$project" "${claude_args[@]+"${claude_args[@]}"}"
+    echo "Session '$session_name' is already running — attaching with $agent..."
+    exec_agent "$project" "$agent" "${agent_args[@]+"${agent_args[@]}"}"
     return
   fi
 
@@ -236,7 +279,7 @@ cmd_launch() {
   export USER_UID="$(id -u)"
   export USER_GID="$(id -g)"
 
-  echo "Starting session '$session_name'"
+  echo "Starting session '$session_name' ($agent)"
   echo "  Directory : $dev_dir"
   echo "  Ports     : localhost:$port1 -> 3000, :$port2 -> 5173, :$port3 -> 8080, :$port4 -> 8000"
   if [ "$session_env_file" != "/dev/null" ]; then
@@ -249,7 +292,7 @@ cmd_launch() {
   SESSION_ENV_FILE="$session_env_file" \
     docker compose -p "$project" up -d --wait
 
-  exec_claude "$project" "${claude_args[@]+"${claude_args[@]}"}"
+  exec_agent "$project" "$agent" "${agent_args[@]+"${agent_args[@]}"}"
 }
 
 cmd_shell() {

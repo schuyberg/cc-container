@@ -34,6 +34,12 @@ services:
     # (including the standalone cc-container setup's own sessions).
     working_dir: /workspace/myproject
 
+    # Stable hostname for "the host machine" (e.g. a locally-running Ollama
+    # server for opencode). Just a /etc/hosts entry — the firewall still
+    # gates the actual connection.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
     # Same containment posture as the standalone setup.
     cap_drop:
       - ALL
@@ -60,6 +66,12 @@ services:
       # this project's session is already logged in. Requires that volume
       # to already exist (created by `claude-code setup` once).
       - claude-config:/home/claude/.claude
+      # Same idea for opencode, if this session also uses it: reuse its
+      # shared data volume (auth.json/login) instead of claude-config's.
+      # Not mounting opencode-config here — it'd sit under the /home/claude/.config
+      # tmpfs scratch above, so global opencode settings stay ephemeral in this
+      # locked-down read_only profile; only the login itself persists.
+      - opencode-data:/home/claude/.local/share/opencode
     environment:
       - CLAUDE_CONFIG_DIR=/home/claude/.claude
       # Add the db's hostname so it isn't blocked by the outbound firewall
@@ -87,3 +99,6 @@ volumes:
   claude-config:
     external: true
     name: claude-code-auth
+  opencode-data:
+    external: true
+    name: opencode-data
